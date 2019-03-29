@@ -13,12 +13,21 @@ output:
 
 ---
 
+```{r include=FALSE}
+options(width = 1000)
+```
+
+![](trivago.png)
+
+
 # Introduction
+
+---
 
 This R Markdown document presents the result of the Trivago Hits model.
 
 ## Background
-The data is in .csv format containing information of about nine hundred thousand sessions.  The columns should be understood as follows:
+The data is in .csv format containing information of about nine hundred thousand sessions. The columns should be understood as follows:
 
 * row_num: a number uniquely identifying each row.
 * locale: the platform of the session.
@@ -31,23 +40,123 @@ The data is in .csv format containing information of about nine hundred thousand
 * session_duration: the duration in seconds of the session.
 * hits: the number of interactions with the trivago page during the session.
 
-
 ## Task
 Note that the column “hits” has missing values. Use the data provided to build a model that predicts the number of hits per session, depending on the given parameters. Refer to the deliverables section to check how to hand in your solution.
-
-
 
 ## Evaluation
 Your predictions will be evaluated by the root mean square error. 
 
 $$ error  = \sqrt{\frac{\sum_{i=1}^{N} ( predictedHits_i - oservedHits_i)^2}{N}}$$
 
+<br>
 
 
-![](trivago.png)
+# Import data
 
-libraries needed in R
-```{r setup, include=FALSE}
+---
+
+The libraries that we need in this analysis in R
+
+```{r message=FALSE, warning=FALSE, include=TRUE}
 library(tidyverse)
+library(skimr)
 library(h2o)
 ```
+
+First let us import the data
+
+```{r message=TRUE, warning=TRUE, include=FALSE}
+hitsData = read_delim(
+  "ML Data Scientist Case Study Data.csv",
+  delim = ";", 
+  col_types = cols(
+    hits = col_double(), 
+    agent_id = col_character(),
+    traffic_type = col_character(),
+    entry_page = col_character()
+  )
+)
+```
+
+Now have a very first glance at the data with skimr.
+
+```{r}
+skim(hitsData)
+```
+
+# Data for model building 
+
+Create the data set for model building. Also count the number of locations visited.
+
+```{r}
+hitsModelData = hitsData %>% 
+  filter(
+    !is.na(hits),
+    !is.na(session_durantion)
+  )
+
+hitsModelData = hitsModelData %>% 
+  mutate(
+    nlocations = str_count(path_id_set, ";") + 1
+  )
+
+```
+
+## Hits vs duration
+
+Look at how session duration affects number of hits
+
+```{r}
+quantile(hitsModelData$session_durantion, probs = (0:10)/10)
+
+hitsModelData %>% 
+  mutate(
+    durationClass = cut(session_durantion, breaks = c(-1,0,3,6,22, 57,118 ,324,1200, 100000))
+  ) %>% 
+  ggplot(aes(durationClass, log10(hits))) + 
+  geom_boxplot()
+```
+
+## First idea of variable importance
+
+ignore the path_id_set for now in the variable importance plot
+
+```{r message=FALSE, warning=FALSE}
+h2o.init()
+
+hitsModelData = hitsModelData %>% mutate_if(is.character, as.factor)
+hitsInH2o = as.h2o(hitsModelData)
+out = h2o.randomForest(
+  x = c(2,3,4,5,6,8,9,11),
+  y = 10,
+  hitsInH2o
+)
+
+h2o.varimp_plot(out)
+```
+
+
+## Path id set
+
+
+
+
+
+```{r}
+```
+
+# Create model with h2o
+
+
+
+
+
+# Use champion model to predict hits 
+
+```{r}
+submissionData = hitsData %>% 
+  filter(
+    is.na(hits)
+  )
+```
+
