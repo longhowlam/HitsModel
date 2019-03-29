@@ -1,0 +1,53 @@
+---
+title: "Trivago Hits Model"
+author: "Longhow Lam"
+date: "3/29/2019"
+always_allow_html: yes
+output:
+  prettydoc::html_pretty:
+    highlight: github
+    number_sections: yes
+    theme: cayman
+    toc: yes
+    toc_depth: 2
+
+---
+
+# Introduction
+
+This R Markdown document presents the result of the Trivago Hits model.
+
+## Background
+The data is in .csv format containing information of about nine hundred thousand sessions.  The columns should be understood as follows:
+
+* row_num: a number uniquely identifying each row.
+* locale: the platform of the session.
+* day_of_week: Mon-Fri, the day of the week of the session.
+* hour_of_day: 00-23, the hour of the day of the session.
+* agent_id: the device used for the session.
+* entry_page: describes the landing page of the session.
+* path_id_set: shows all the locations that were visited during the session.
+* traffic_type: indicates the channel the user cane through eg. search engine, email, ...
+* session_duration: the duration in seconds of the session.
+* hits: the number of interactions with the trivago page during the session.
+
+
+## Task
+Note that the column “hits” has missing values. Use the data provided to build a model that predicts the number of hits per session, depending on the given parameters. Refer to the deliverables section to check how to hand in your solution.
+
+
+
+## Evaluation
+Your predictions will be evaluated by the root mean square error. 
+
+$$ error  = \sqrt{\frac{\sum_{i=1}^{N} ( predictedHits_i - oservedHits_i)^2}{N}}$$
+
+
+
+![](trivago.png)
+
+libraries needed in R
+```{r setup, include=FALSE}
+library(tidyverse)
+library(h2o)
+```
