@@ -4,13 +4,15 @@ author: "Longhow Lam"
 date: "3/29/2019"
 always_allow_html: yes
 output:
+  pdf_document:
+    toc: true
+    toc_depth: 2
   prettydoc::html_pretty:
     highlight: github
     number_sections: yes
     theme: cayman
     toc: yes
     toc_depth: 2
-
 ---
 
 ```{r include=FALSE}
@@ -24,7 +26,7 @@ options(width = 1000)
 
 ---
 
-This R Markdown document presents the result of the Trivago Hits model.
+This R Markdown document presents the result of the Trivago Hits model. A copy of this R Markdown can also be found on my [GitHub repository](https://github.com/longhowlam/HitsModel)
 
 ## Background
 The data is in .csv format containing information of about nine hundred thousand sessions. The columns should be understood as follows:
@@ -46,7 +48,7 @@ Note that the column “hits” has missing values. Use the data provided to bui
 ## Evaluation
 Your predictions will be evaluated by the root mean square error. 
 
-$$ error  = \sqrt{\frac{\sum_{i=1}^{N} ( predictedHits_i - oservedHits_i)^2}{N}}$$
+$$ error  = \sqrt{\frac{\sum_{i=1}^{N} ( predictedHits_i - observedHits_i)^2}{N}}$$
 
 <br>
 
@@ -60,10 +62,13 @@ The libraries that we need in this analysis in R
 ```{r message=FALSE, warning=FALSE, include=TRUE}
 library(tidyverse)
 library(skimr)
+library(arules)
+library(arulesViz)
 library(h2o)
+library(plotly)
 ```
 
-First let us import the data
+First let us import the data, and create a variable with the number of locations visited. The path_id_set might be empty (missing) we then assume zero locations visited!
 
 ```{r message=TRUE, warning=TRUE, include=FALSE}
 hitsData = read_delim(
@@ -76,17 +81,24 @@ hitsData = read_delim(
     entry_page = col_character()
   )
 )
+
+hitsData = hitsData %>% 
+  mutate(
+    nlocations = str_count(path_id_set, ";") + 1,
+    nlocations = ifelse(is.na(nlocations), 0, nlocations)
+  )
 ```
 
-Now have a very first glance at the data with skimr.
+Now have a very first glance at the data with skimr too see for example if there are a lot of missing values.
 
 ```{r}
 skim(hitsData)
 ```
 
+
 # Data for model building 
 
-Create the data set for model building. Also count the number of locations visited.
+Create the data set for building the model.
 
 ```{r}
 hitsModelData = hitsData %>% 
@@ -94,69 +106,330 @@ hitsModelData = hitsData %>%
     !is.na(hits),
     !is.na(session_durantion)
   )
+```
 
-hitsModelData = hitsModelData %>% 
+## Hits vs duration and number of locations
+
+Look at how session duration and number of location visited affect the number of hits. We break up session duration in intervals and we look at log of number of hits. They are too large to see anything on a normal plot
+
+```{r, fig.width=14}
+## take 10% percentiles as breaks
+p10 = quantile(hitsModelData$session_durantion, probs = (0:10)/10)
+
+hitsModelData %>% 
   mutate(
-    nlocations = str_count(path_id_set, ";") + 1
+    durationClass = cut(session_durantion, breaks = c(-1,unique(p10)))
+  ) %>% 
+  ggplot(
+    aes(durationClass, log10(hits))
+  ) + 
+  geom_boxplot() +
+  labs(
+    x = "duration classes", 
+    y = "log of number of hits", 
+    title = "Number of hits vs session duration"
+  )
+
+hitsModelData %>%
+  filter(
+    hits < 2000,
+    nlocations < 50
+  ) %>% 
+  ggplot(
+    aes(nlocations, hits)
+  ) + 
+  geom_point() + 
+  geom_smooth() +
+  labs(
+    x = "number locations visited", 
+    y = "number of hits", 
+    title = "Number of hits vs number of locations visited"
   )
 
 ```
 
-## Hits vs duration
+## Variable importance
 
-Look at how session duration affects number of hits
+To get an idea of the predictive power of the individual inputs we fit a random forest and look at the variable importance plot. Ignore the `path_id_set` variable for now in the variable importance plot, there are too many unique possibilities. We deal with it later.
 
-```{r}
-quantile(hitsModelData$session_durantion, probs = (0:10)/10)
-
-hitsModelData %>% 
-  mutate(
-    durationClass = cut(session_durantion, breaks = c(-1,0,3,6,22, 57,118 ,324,1200, 100000))
-  ) %>% 
-  ggplot(aes(durationClass, log10(hits))) + 
-  geom_boxplot()
+```{r message=FALSE, warning=FALSE, include=FALSE}
+h2o.init()
 ```
 
-## First idea of variable importance
+My go to package for machine learning in R is h2o. 
 
-ignore the path_id_set for now in the variable importance plot
+```{r message=FALSE, warning=FALSE, include = FALSE, cache=TRUE}
+## character columns need to be factor columns in h2o.
+hitsModelData = hitsModelData %>% 
+  mutate_if(is.character, as.factor)
 
-```{r message=FALSE, warning=FALSE}
-h2o.init()
-
-hitsModelData = hitsModelData %>% mutate_if(is.character, as.factor)
+## bring data to h20
 hitsInH2o = as.h2o(hitsModelData)
+
+## train forest and show variable importance plot
 out = h2o.randomForest(
   x = c(2,3,4,5,6,8,9,11),
   y = 10,
   hitsInH2o
 )
+```
 
+```{r eval=FALSE}
+## character columns need to be factor columns in h2o.
+hitsModelData = hitsModelData %>% 
+  mutate_if(is.character, as.factor)
+
+## bring data to h20
+hitsInH2o = as.h2o(hitsModelData)
+
+## train forest and show variable importance plot
+out = h2o.randomForest(
+  x = c(2,3,4,5,6,8,9,11),
+  y = 10,
+  hitsInH2o
+)
+```
+
+
+```{r varplot}
 h2o.varimp_plot(out)
 ```
 
 
-## Path id set
+## Associations Rules Mining (ARM)
+
+ARM, is also known as market basket analysis in a supermarket setting. 
+
+The `path_id_set` column contains the location id's visited in a session. With ARM it is interesting to see which locations (also called items in ARM terminology) are often visited together in one session. This can be learned by applying the so-called apriori algorithm to all the sessions that we have. The result will be a set of rules learned from the data in the form:
+
+* IF {location 4321} THEN likely also {location 6544}. 
+* IF {location 12345} THEN likely also {location 98765}.
+
+This is an interesting exercise on its own right. What we want do here however, is to see if any of the location id's (items) can be linked with large or small number of hits.
+Therefore we bucketize the number hits in buckets, and add them to the path_id_set so that these "hit buckets" also become items. When we now run the apriori algorithm and see if the algorithm find rules of the form: 
+
+* IF {location 54332} THEN likely {high number of hits} 
+* IF {location 43210} THEN likely {low number of hits}
+
+For each rule that the algorithm will find, some interesting statistics are provided as well. The support, confidence and lift, they will help us to evaluate a rule. For example, the lift will tell us how much more likely it is to see a high number of hits given a location is visited, compared to when the location was not visited.
+
+```{r createtransactions, cache=TRUE}
+## take 10% percentiles as breaks for the hits
+p10 = quantile(hitsModelData$hits, probs = (0:9)/9)
+
+# Create hitbuckes named: H1, H2, up until H10 for the bucket with the most number of hits
+# write out this basket data to file
+basketData = hitsModelData %>%
+  mutate(
+    hitsBuckets = sprintf(
+      "H%02d", 
+      as.integer( cut(hits, breaks = c(0, p10)) )
+    ),
+    baskets = paste( hitsBuckets, path_id_set, sep = ";")
+  ) %>% 
+  select(baskets)
+
+write_csv(basketData, "marketbaskets.csv")
+
+# using read.transactions in the arules package we can read the file
+# so that it becomes a proper transaction object for the aprior algorithm
+paths = read.transactions("marketbaskets.csv", format = "basket", skip=1, TRUE, sep=";")
+```
+
+Now the object `paths` is a formal arules transaction object from which we can run the apriori algorithm. But first let's see some frequencies of the individual items.
+
+```{r, fig.height=19}
+print(paths)
+
+freqs = sort(itemFrequency(paths, type="absolute"), decreasing = TRUE)
+freqs_df = data.frame(location = names(freqs), frequency = freqs)
+head(freqs_df, 15)
+```
+
+We that there are 618820 transactions, this is just the number of sessions with a non missing number of hits, in total there are 28226 items (28216 locations visited and 10 hit buckets). We see that after location `0`, the location `38715` is the most visited location in this data.
+
+Now lets generate association rules, we restrict ourselves to rules of the form {A} --> {B} (max length = 2).
+
+```{r apriori, message=FALSE, warning=FALSE}
+locationRules = apriori(
+  paths,
+  parameter = list(
+    conf = 0.0001, supp = 0.0001,  target = "rules", maxlen = 2
+  )
+)
+print(locationRules)
+```
+We have generated thousands of rules. If we look at the top rules (based on lift) we get the following table. We see that location 420 and 480 often go hand in hand. 
+
+```{r fig.height=13, fig.width=13, message=FALSE, warning=FALSE}
+inspect( sort(locationRules, by = "lift")[1:15])
+plot(subset(locationRules, lift > 2), method="graph")
+```
+
+Now look at rules where hit buckets are involved. First look at locations found in rules leading to high hit buckets (H9 and H10).
+
+```{r}
+HighHitsRules = arules::subset(locationRules, rhs %pin% c("H09","H10") & lift > 1.1)
+
+inspect(HighHitsRules[1:20])
+plotly_arules(
+  HighHitsRules, 
+  max = 4000, 
+  measure = c("support", "lift"), 
+  shading = "conf"
+)  %>% 
+  layout(title = 'locations found that lead to high number of hits')
+```
+
+We can also look at rules that do not lead to high number of hits, where the lift is smaller than 1.
+
+```{r message=FALSE, warning=FALSE}
+AntiHighHitsRules = arules::subset(locationRules, rhs %pin% c("H09","H10") & lift < 0.9)
+```
+
+Do the same with low hit buckets.
+
+```{r message=FALSE, warning=FALSE}
+LowHitsRules = arules::subset(locationRules, rhs %pin% c("H01","H02", "H03") & lift > 1.1 )
+AntiLowHitsRules = arules::subset(locationRules, rhs %pin% c("H01","H02", "H03") & lift < 0.9 )
+```
 
 
+# Create the predictive model with h2o
 
+## Create Additional features based on locations
+
+From the rules learned in the previous section we can now extract location ID's that are likely to lead to high number of hits/interactions. We create additional features in the data set that will indicate how many of these locations are visited during a session.
+
+```{r}
+highloc = DATAFRAME(HighHitsRules) %>% 
+  select(LHS) %>%
+  mutate(
+    locations = as.character(LHS) %>% 
+      str_replace_all("\\{","") %>% 
+      str_replace("\\}","")
+  ) %>%  .$locations
+
+antihighloc = DATAFRAME(AntiHighHitsRules) %>% 
+  select(LHS) %>%
+  mutate(
+    locations = as.character(LHS) %>% 
+      str_replace_all("\\{","") %>% 
+      str_replace("\\}","")
+  ) %>%  .$locations
+
+lowloc = DATAFRAME(LowHitsRules) %>% 
+  select(LHS) %>%
+  mutate(
+    locations = as.character(LHS) %>% 
+      str_replace_all("\\{","") %>% 
+      str_replace("\\}","")
+  ) %>%  .$locations
+
+antilowloc = DATAFRAME(AntiLowHitsRules) %>% 
+  select(LHS) %>%
+  mutate(
+    locations = as.character(LHS) %>% 
+      str_replace_all("\\{","") %>% 
+      str_replace("\\}","")
+  ) %>%  .$locations
+```
+
+Now create new columns in the modeling data set by counting how many times we see a "high" or "low" location in the path_id_set.
+
+```{r newcolumns, cache=TRUE}
+hitsModelData2 = hitsModelData %>% 
+  rowwise() %>% 
+  mutate(
+    test =  path_id_set %>% str_split(";"),
+    high_hit_locs = sum( !is.na(match( highloc, test)) ),
+    anti_high_hit_locs = sum( !is.na(match( antihighloc, test)) ),
+    low_hit_locs = sum( !is.na(match( lowloc, test)) ),
+    anti_low_hit_locs = sum( !is.na(match( antilowloc, test)) )
+  ) %>% 
+  select(-test)
+```
+
+A quick inspection shows that indeed if sessions contain 1 or more "high locations" have on average more hits.
+
+```{r}
+hitsModelData2 %>% 
+  group_by(high_hit_locs) %>% 
+  summarise(n = n(), mean_hits = mean(hits))
+```
+
+
+## Use automl to Build the predictive model
+
+Now we can build a model with the extra "location" features. We are going to use `automl` in the h2o package, it trains and cross-validates a Random Forest, an Extremely-Randomized Forest, a random grid of Gradient Boosting Machines (GBMs), a random grid of Deep Neural Nets, and then trains a Stacked Ensemble using all of the models.
+
+We let it run for 1 hour, which is the default.
+
+```{r automl, eval=FALSE}
+hitsModelData3 = hitsModelData2 %>% as.data.frame()
+hitsModelData3 = hitsModelData3 %>%  mutate_if(is.character, as.factor)
+hitsInH2o = as.h2o(hitsModelData3)
+
+TT = h2o.splitFrame(hitsInH2o)
+out = h2o.automl(
+  x = c(2,3,4,5,6,8,9,11,12,13,14,15),
+  y = 10,
+  training_frame = TT[[1]],
+  validation_frame = TT[[2]],
+)
+
+## save winner model to disk
+winner = out@leader
+h2o.saveModel(winner, "winnerModel")
+```
+
+Lets have look at the leader board. A stacked ensemble of all models is the one with the lowest RMSE. The RMSE is 31.93287 reported on cross-validation data (5-fold cross-validation on training data (Metrics computed for combined holdout predictions). And the RMSE reported on the separate holdout test set is 30.18.
 
 
 ```{r}
+leaderboard = readRDS( "leaderboard.RDs")
+leaderboard
 ```
-
-# Create model with h2o
-
-
-
-
 
 # Use champion model to predict hits 
 
-```{r}
+We can load the saved champion model to score the submission data set. I.e. the data in the input file for which there are missing values in the hits column.
+
+```{r predicting, eval=FALSE}
+champion = h2o.loadModel("winnerModel/StackedEnsemble_AllModels_AutoML_20190331_173503")
+
 submissionData = hitsData %>% 
   filter(
     is.na(hits)
   )
+
+## create the extra "location" features
+
+submissionData = submissionData %>% 
+  rowwise() %>% 
+  mutate(
+    test =  path_id_set %>% str_split(";"),
+    high_hit_locs = sum( !is.na(match( highloc, test)) ),
+    anti_high_hit_locs = sum( !is.na(match( antihighloc, test)) ),
+    low_hit_locs = sum( !is.na(match( lowloc, test)) ),
+    anti_low_hit_locs = sum( !is.na(match( antilowloc, test)) )
+  ) %>% 
+  select(-test)
+
+## transform character type to factor and upload to h2o for scoring
+submissionData = submissionData %>% 
+  as.data.frame() %>%
+  mutate_if(is.character, as.factor)
+
+submInH2o = as.h2o(submissionData)
+
+predictions = h2o.predict(champion, submInH2o)
+
+final_submissionData = bind_cols(
+  submissionData %>% select(row_num) , 
+  predictions %>% as.data.frame()
+) %>% rename(hits = predict)
+
+write_csv(final_submissionData, "submission.csv")
 ```
 
